@@ -36,3 +36,15 @@ if __name__ == "__main__":
         asyncio.run(main())
     except Exception as e:
         logger.exception(f"Bot crashed: {e}")
+from admin import (
+    add_money_handler,
+    create_code_handler,
+    topnap_handler,
+    force_result_handler
+)
+
+app.add_handler(CommandHandler("congtien", add_money_handler))
+app.add_handler(CommandHandler("code", create_code_handler))
+app.add_handler(CommandHandler("topnap", topnap_handler))
+app.add_handler(CommandHandler(["nho", "lon", "chan", "le"], force_result_handler))
+
