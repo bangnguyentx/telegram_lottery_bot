@@ -1,15 +1,61 @@
-// bot.js
-// Node 18+
-// npm i telegraf pg dotenv
-require('dotenv').config();
-const { Telegraf } = require('telegraf');
-const { Pool } = require('pg');
+// 🟦 1️⃣ Fake HTTP server cho Render (nếu bạn dùng Web Service)
+import http from 'http';
+const port = process.env.PORT || 10000;
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('✅ Telegram Bot is running on Render\n');
+}).listen(port, () => {
+  console.log(`🌐 Web server listening on port ${port}`);
+});
 
+// 🟩 2️⃣ Load biến môi trường từ file .env
+import dotenv from 'dotenv';
+dotenv.config();
+
+// 🟨 3️⃣ Import các thư viện cần thiết
+import { Telegraf } from 'telegraf';
+import pkg from 'pg';
+const { Pool } = pkg;
+
+// 🟥 4️⃣ Lấy Environment Variables
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const ADMIN_ID = parseInt(process.env.ADMIN_ID, 10); // e.g. 123456789
+const ADMIN_ID = parseInt(process.env.ADMIN_ID, 10);
 const DATABASE_URL = process.env.DATABASE_URL;
-const PORT = process.env.PORT || 3000;
 
+if (!BOT_TOKEN || !DATABASE_URL) {
+  console.error('❌ Thiếu BOT_TOKEN hoặc DATABASE_URL trong biến môi trường!');
+  process.exit(1);
+}
+
+// 🟦 5️⃣ Khởi tạo kết nối DB
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false, // Render DB thường yêu cầu SSL
+  },
+});
+
+pool.connect()
+  .then(() => console.log('✅ Đã kết nối PostgreSQL thành công'))
+  .catch(err => {
+    console.error('❌ Lỗi kết nối DB:', err);
+    process.exit(1);
+  });
+
+// 🟧 6️⃣ Khởi tạo Bot
+const bot = new Telegraf(BOT_TOKEN);
+
+// Ví dụ đơn giản — kiểm tra bot
+bot.start((ctx) => ctx.reply('Xin chào 👋 Bot đã hoạt động 24/7 trên Render!'));
+
+// 🟫 7️⃣ Khởi động Bot
+bot.launch().then(() => {
+  console.log('🤖 Bot Telegram đã khởi động thành công!');
+});
+
+// Đảm bảo bot shutdown gọn khi Render gửi tín hiệu
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
 if (!BOT_TOKEN || !ADMIN_ID || !DATABASE_URL) {
   console.error("Missing BOT_TOKEN, ADMIN_ID or DATABASE_URL in env.");
   process.exit(1);
