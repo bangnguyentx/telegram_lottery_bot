@@ -3,7 +3,7 @@
 import asyncio
 import random
 from datetime import datetime
-from telegram.constants import ChatPermissions
+from telegram import ChatPermissions
 from telegram import Bot
 
 from db import get_all_groups, get_bets_for_round_all, update_balance, clear_bets_for_round, insert_history
