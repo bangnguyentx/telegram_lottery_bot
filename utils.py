@@ -3,83 +3,109 @@ import asyncio
 from datetime import datetime
 from telegram import ChatPermissions
 
-# 🧮 Định dạng tiền: 1000000 -> "1,000,000₫"
+# ==============================
+# 💰 Format tiền có dấu phẩy
+# ==============================
 def format_money(amount: int) -> str:
-    return f"{amount:,}₫"
+    try:
+        return f"{amount:,}₫"
+    except Exception:
+        return f"{amount}₫"
 
-# 🎲 Random 6 chữ số (0–9)
-def generate_result(round_id: int) -> str:
-    """
-    Cách random: lấy thời gian hiện tại (HHMMSS) + 4 số cuối round_id,
-    cộng lại -> nếu tổng lẻ thì ra số ngẫu nhiên chẵn, nếu tổng chẵn thì ra số ngẫu nhiên lẻ.
-    Sau đó random đủ 6 số.
-    """
+# ==============================
+# 🎲 Random kết quả xổ số (6 số)
+# - Dùng giờ UTC + 4 số cuối phiên để tạo seed → đảm bảo ổn định
+# ==============================
+def random_result(period_id: int) -> str:
     now = datetime.utcnow()
-    seed = int(now.strftime("%H%M%S")) + int(str(round_id)[-4:])
+    time_str = now.strftime("%H%M")  # HHMM
+    seed = int(time_str + str(period_id)[-4:])  # ví dụ 0754 + 2345
     random.seed(seed)
-    digits = [str(random.randint(0, 9)) for _ in range(6)]
-    return "".join(digits)
+    return "".join(str(random.randint(0, 9)) for _ in range(6))
 
-# 🟡 Icon lịch sử phiên
-def get_history_icon(result: str) -> str:
-    """ 
-    Quy ước:
-      - ⚪ = Nhỏ (0–5)
-      - ⚫ = Lớn (6–9)
-      - 🟠 = Chẵn
-      - 🔵 = Lẻ
-    Lấy chữ số cuối cùng để quyết định lớn/nhỏ/chẵn/lẻ
-    """
-    last_digit = int(result[-1])
-    icons = ""
-    if last_digit <= 5:
-        icons += "⚪"
-    else:
-        icons += "⚫"
-    if last_digit % 2 == 0:
-        icons += "🟠"
-    else:
-        icons += "🔵"
-    return icons + f" {last_digit}"
-
-# 🔐 Khóa chat nhóm khi còn 5s
-async def lock_chat(context, chat_id):
+# ==============================
+# 🔐 Khoá chat nhóm (không cho gửi tin nhắn)
+# ==============================
+async def lock_group_chat(bot, chat_id: int):
+    perms = ChatPermissions(can_send_messages=False)
     try:
-        await context.bot.set_chat_permissions(
-            chat_id=chat_id,
-            permissions=ChatPermissions(can_send_messages=False)
-        )
+        await bot.set_chat_permissions(chat_id=chat_id, permissions=perms)
+        print(f"[LockChat] Đã khoá chat {chat_id}")
     except Exception as e:
-        print(f"[lock_chat] Lỗi: {e}")
+        print(f"[LockChat] Lỗi: {e}")
 
-# 🔓 Mở chat nhóm khi sang phiên mới
-async def unlock_chat(context, chat_id):
+# ==============================
+# 🔓 Mở chat nhóm
+# ==============================
+async def unlock_group_chat(bot, chat_id: int):
+    perms = ChatPermissions(
+        can_send_messages=True,
+        can_send_media_messages=True,
+        can_send_polls=True,
+        can_send_other_messages=True
+    )
     try:
-        await context.bot.set_chat_permissions(
-            chat_id=chat_id,
-            permissions=ChatPermissions(can_send_messages=True)
-        )
+        await bot.set_chat_permissions(chat_id=chat_id, permissions=perms)
+        print(f"[UnlockChat] Đã mở chat {chat_id}")
     except Exception as e:
-        print(f"[unlock_chat] Lỗi: {e}")
+        print(f"[UnlockChat] Lỗi: {e}")
 
-# ⏱️ Countdown 60s cho mỗi phiên
-async def countdown_and_announce(context, chat_id, round_id, announce_fn):
-    """
-    - Gửi thông báo còn 30s / 10s / 5s
-    - Khóa chat khi còn 5s
-    - Hết giờ thì gọi announce_fn() để xử lý tung kết quả
-    """
-    try:
-        await asyncio.sleep(30)
-        await context.bot.send_message(chat_id, "⏳ Còn 30 giây để đặt cược...")
+# ==============================
+# ⏱ Countdown gửi thông báo
+# - Gửi khi còn 30s, 10s, 5s
+# - Khi còn 5s → khoá chat
+# ==============================
+async def countdown(bot, chat_id: int, delay: int):
+    if delay <= 0:
+        return
+
+    # Thông báo còn 30s
+    if delay > 30:
+        await asyncio.sleep(delay - 30)
+    if delay >= 30:
+        try:
+            await bot.send_message(chat_id, "⏳ Còn **30 giây** để tham gia phiên này!")
+        except Exception as e:
+            print(f"[Countdown] 30s lỗi: {e}")
+
+    # Thông báo còn 10s
+    if delay > 10:
         await asyncio.sleep(20)
-        await context.bot.send_message(chat_id, "⏳ Còn 10 giây để đặt cược...")
+    if delay >= 10:
+        try:
+            await bot.send_message(chat_id, "⚠️ Còn **10 giây** trước khi khoá!")
+        except Exception as e:
+            print(f"[Countdown] 10s lỗi: {e}")
+
+    # Thông báo còn 5s và khoá chat
+    if delay > 5:
         await asyncio.sleep(5)
-        await context.bot.send_message(chat_id, "⏳ Còn 5 giây, chuẩn bị khoá chat!")
-        await lock_chat(context, chat_id)
-        await asyncio.sleep(5)
-        # Hết giờ: xử lý kết quả
-        await announce_fn()
-        await unlock_chat(context, chat_id)
+    try:
+        await bot.send_message(chat_id, "🚪 Đang khoá chat, chuẩn bị quay số!")
+        await lock_group_chat(bot, chat_id)
     except Exception as e:
-        print(f"[countdown_and_announce] Lỗi: {e}")
+        print(f"[Countdown] 5s lỗi: {e}")
+
+# ==============================
+# 📅 Tạo mã phiên theo thời gian
+# ==============================
+def generate_period_id() -> int:
+    now = datetime.utcnow()
+    return int(now.strftime("%y%m%d%H%M%S"))  # ví dụ: 250930123000
+
+# ==============================
+# 📝 Kiểm tra 1 user đã nhận quà start chưa
+# ==============================
+def has_received_start_bonus(conn, user_id: int) -> bool:
+    cur = conn.cursor()
+    cur.execute("SELECT received_bonus FROM users WHERE user_id=?", (user_id,))
+    row = cur.fetchone()
+    return bool(row and row[0] == 1)
+
+# ==============================
+# 📝 Đánh dấu user đã nhận quà start
+# ==============================
+def mark_start_bonus_received(conn, user_id: int):
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET received_bonus=1 WHERE user_id=?", (user_id,))
+    conn.commit()
