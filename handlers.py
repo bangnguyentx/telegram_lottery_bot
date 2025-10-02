@@ -1,144 +1,139 @@
-# handlers.py — Xử lý lệnh cược & nhóm QLottery_bot
+# handlers.py — Xử lý lệnh người dùng & nhóm cho QLottery_bot
 
 import re
-import logging
 from datetime import datetime
 from telegram import Update
 from telegram.ext import ContextTypes, CommandHandler, MessageHandler, filters
 
-from db import get_user, ensure_user, update_balance, insert_or_update_bet, get_bets_for_round, clear_bets_for_round
-from utils import format_money, get_current_round_id, lock_group_chat, unlock_group_chat, send_countdown
+from db import (
+    get_user,
+    ensure_user,
+    insert_bet,
+    get_user_bet_in_round,
+    update_bet_amount,
+    get_group,
+)
+from utils import (
+    get_current_round_id,
+    format_money,
+)
 
-logger = logging.getLogger(__name__)
+# ----------- CẤU HÌNH -----------
 
-# Hệ số trả thưởng
-PAYOUTS = {
-    "N": 1.97,
-    "L": 1.97,
-    "C": 1.97,
-    "LE": 1.97
-}
+MIN_BET = 5000  # Mức cược tối thiểu
 
-# ----- 📌 XỬ LÝ CƯỢC -----
+# ----------- HỖ TRỢ -----------
 
-async def group_bet_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Xử lý cược trong nhóm: /N1000, /L1000, /C1000, /Le1000, /S123456 1000"""
-    msg = update.effective_message
-    user = update.effective_user
-    chat = update.effective_chat
-    text = msg.text.strip()
+def parse_bet_command(text: str):
+    """
+    Trả về (bet_type, bet_value, amount) nếu hợp lệ
+    Hỗ trợ:
+    /N1000 /L5000 /C20000 /Le10000
+    /S123456 1000
+    """
+    text = text.strip()
 
-    if chat.type not in ("group", "supergroup"):
-        return
-
-    # Đảm bảo user tồn tại DB
-    ensure_user(user.id, user.username or "", user.first_name or "")
-
-    # Lấy thông tin user
-    u = get_user(user.id)
-    if not u:
-        await msg.reply_text("Lỗi tài khoản, vui lòng /start lại.")
-        return
-
-    # Xác định loại cược
-    bet_type = None
-    amount = None
-    bet_value = None
-
-    # Kiểm tra lệnh nhỏ/lớn/chẵn/lẻ
+    # Lớn / Nhỏ / Chẵn / Lẻ
     m = re.match(r"^/(N|L|C|Le)(\d+)$", text, re.IGNORECASE)
     if m:
         bet_type = m.group(1).upper()
         amount = int(m.group(2))
-        if bet_type == "LE":
-            bet_type = "LE"  # giữ nguyên chữ hoa cho lẻ
+        return bet_type, bet_type, amount
 
-    # Kiểm tra lệnh cược số /S123456 1000
-    if text.startswith("/S"):
-        parts = text.split()
-        if len(parts) != 2:
-            await msg.reply_text("Cú pháp sai. Ví dụ: /S123456 1000")
-            return
-        numbers = parts[0][2:].strip()
-        amount = int(parts[1])
-        if not numbers.isdigit() or len(numbers) == 0 or len(numbers) > 6:
-            await msg.reply_text("Số cược không hợp lệ (1–6 chữ số).")
-            return
-        bet_type = "S"
-        bet_value = numbers
+    # Đặt số cụ thể: /S123456 1000
+    m = re.match(r"^/S(\d{1,6})\s+(\d+)$", text, re.IGNORECASE)
+    if m:
+        bet_value = m.group(1)
+        amount = int(m.group(2))
+        return "S", bet_value, amount
 
-    if not bet_type or not amount or amount <= 0:
+    return None
+
+# ----------- ĐẶT CƯỢC TRONG NHÓM -----------
+
+async def group_bet_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+
+    # Chỉ xử lý trong group
+    if chat.type not in ("group", "supergroup"):
         return
 
-    # ✅ Kiểm tra số dư
-    balance = u["balance"] or 0
-    if balance < amount:
-        await msg.reply_text("❌ Số dư không đủ.")
+    if not msg.text:
         return
 
-    # ✅ Xác định round hiện tại
+    parsed = parse_bet_command(msg.text)
+    if not parsed:
+        return
+
+    bet_type, bet_value, amount = parsed
+
+    # Kiểm tra mức cược
+    if amount < MIN_BET:
+        await msg.reply_text(f"⚠️ Mức cược tối thiểu là {format_money(MIN_BET)}")
+        return
+
+    # Đảm bảo user tồn tại trong DB
+    ensure_user(user.id, user.username or "", user.first_name or "")
+
+    u = get_user(user.id)
+    if not u:
+        await msg.reply_text("❌ Lỗi người dùng, hãy /start trước khi cược.")
+        return
+
+    if u["balance"] < amount:
+        await msg.reply_text("💸 Số dư không đủ để đặt cược.")
+        return
+
+    # Kiểm tra group đã được duyệt chạy chưa
+    g = get_group(chat.id)
+    if not g or g["approved"] != 1:
+        await msg.reply_text("⛔ Nhóm này chưa được admin duyệt để bot hoạt động.")
+        return
+
+    # Xác định round hiện tại
     round_id = get_current_round_id(chat.id)
 
-    # ✅ Kiểm tra không cược ngược cùng phiên
-    existing_bets = get_bets_for_round(chat.id, round_id, user.id)
-    if existing_bets:
-        for b in existing_bets:
-            if b["bet_type"] in ("N", "L") and bet_type in ("N", "L") and b["bet_type"] != bet_type:
-                await msg.reply_text("❌ Bạn không thể cược Nhỏ và Lớn cùng phiên.")
-                return
-            if b["bet_type"] in ("C", "LE") and bet_type in ("C", "LE") and b["bet_type"] != bet_type:
-                await msg.reply_text("❌ Bạn không thể cược Chẵn và Lẻ cùng phiên.")
-                return
+    # Kiểm tra vé đã cược trong phiên này
+    existing_bet = get_user_bet_in_round(user.id, chat.id, round_id, bet_type, bet_value)
 
-    # ✅ Trừ tiền ngay
-    new_balance = balance - amount
+    # ❌ Không cho cược ngược
+    if bet_type in ("N", "L"):
+        opposite = "L" if bet_type == "N" else "N"
+    elif bet_type in ("C", "LE"):
+        opposite = "LE" if bet_type == "C" else "C"
+    else:
+        opposite = None
+
+    if opposite:
+        opposite_bet = get_user_bet_in_round(user.id, chat.id, round_id, opposite, opposite)
+        if opposite_bet:
+            await msg.reply_text("🚫 Bạn không thể cược ngược trong cùng một phiên!")
+            return
+
+    # Nếu đã cược cùng loại → cộng dồn tiền
+    if existing_bet:
+        new_amount = existing_bet["amount"] + amount
+        update_bet_amount(existing_bet["id"], new_amount)
+    else:
+        insert_bet(chat.id, round_id, user.id, bet_type, bet_value, amount)
+
+    # Trừ tiền người chơi
+    new_balance = u["balance"] - amount
+    from db import update_balance
     update_balance(user.id, new_balance)
 
-    # ✅ Ghi cược vào DB (nếu đã cược cùng loại → cộng dồn)
-    insert_or_update_bet(chat.id, round_id, user.id, bet_type, bet_value, amount)
+    await msg.reply_text(f"✅ Đã cược {bet_type} {format_money(amount)} cho phiên hiện tại.")
 
-    # ✅ Xác nhận đặt cược
-    if bet_type == "S":
-        display = f"Số {bet_value}"
-    elif bet_type == "N":
-        display = "Nhỏ"
-    elif bet_type == "L":
-        display = "Lớn"
-    elif bet_type == "C":
-        display = "Chẵn"
-    elif bet_type == "LE":
-        display = "Lẻ"
-
-    await msg.reply_text(f"✅ Đã đặt {display} {format_money(amount)} cho phiên hiện tại.")
-
-# ----- 🧮 TÍNH THƯỞNG -----
-
-def calculate_payout(bet_type: str, bet_value: str, amount: int, result_number: str, result_category: str):
-    """Tính tiền thưởng dựa theo loại cược & kết quả"""
-    if bet_type in ("N", "L", "C", "LE"):
-        if bet_type == result_category:
-            return int(amount * PAYOUTS[bet_type])
-        return 0
-
-    if bet_type == "S":
-        # So khớp số cuối cùng của kết quả với bet_value
-        if result_number.endswith(bet_value):
-            n = len(bet_value)
-            if n == 1:
-                return int(amount * 9.2)
-            elif n == 2:
-                return int(amount * 90)
-            elif n == 3:
-                return int(amount * 900)
-            elif n == 4:
-                return int(amount * 8000)
-            elif n == 5:
-                return int(amount * 50000)
-            elif n == 6:
-                return int(amount * 200000)
-    return 0
-
-# ----- ⏰ ĐĂNG KÝ HANDLER -----
+# ----------- ĐĂNG KÝ HANDLERS -----------
 
 def register_group_handlers(app):
-    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS, group_bet_handler))
+    """Đăng ký handler cho group"""
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, group_bet_handler))
+    app.add_handler(MessageHandler(filters.COMMAND, group_bet_handler))
+
+
+def register_user_handlers(app):
+    """Các lệnh riêng tư (PM bot)"""
+    pass
