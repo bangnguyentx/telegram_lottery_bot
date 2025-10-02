@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: telegram-lottery-bot
+    env: node
+    plan: free
+    buildCommand: "npm install"
+    startCommand: "node bot.js"
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
