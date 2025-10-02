@@ -1,50 +1,61 @@
-import logging
+# bot.py — Main khởi động QLottery_bot
+
+import os
 import asyncio
 from telegram.ext import ApplicationBuilder
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
 from handlers import register_user_handlers, register_group_handlers
-from admin import register_admin_handlers
-from db import init_db
 from utils import start_lottery_cycle
 
-# --- CẤU HÌNH ---
-TOKEN = "7482983031:AAHp-DGJMGr0AWoOEk75eV02glQNlPn0wKI"
-ADMIN_IDS = [7760459637]   # Admin chính
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# ==============================
+# ⚙️ 1. Cấu hình BOT
+# ==============================
 
-# --- MAIN ---
+# Token Telegram Bot (bắt buộc)
+TOKEN = os.getenv("BOT_TOKEN")
+if not TOKEN:
+    raise RuntimeError("❌ Thiếu biến môi trường BOT_TOKEN!")
+
+# Cổng chạy (Render hoặc Localhost)
+PORT = int(os.getenv("PORT", 10000))
+
+# ==============================
+# 🚀 2. Khởi tạo App
+# ==============================
+
+app = ApplicationBuilder().token(TOKEN).build()
+
+# ==============================
+# 🧠 3. Đăng ký Handlers
+# ==============================
+
+register_user_handlers(app)
+register_group_handlers(app)
+
+# ==============================
+# 🌀 4. Vòng quay xổ số nền
+# ==============================
+
+async def background_lottery_cycle():
+    """Chạy vòng xổ số cho tất cả group mỗi 60s"""
+    while True:
+        try:
+            await start_lottery_cycle(app)
+        except Exception as e:
+            print(f"[❌ Lỗi vòng xổ số]: {e}")
+        await asyncio.sleep(1)  # tránh vòng lặp siêu tốc khi lỗi
+
+# ==============================
+# 🏁 5. Main
+# ==============================
+
 async def main():
-    init_db()
-    app = ApplicationBuilder().token(TOKEN).build()
-
-    # Đăng ký handler
-    register_user_handlers(app)
-    register_group_handlers(app)
-    register_admin_handlers(app, ADMIN_IDS)
-
-    # Scheduler 60s quay số
-    scheduler = AsyncIOScheduler(timezone="UTC")
-    scheduler.add_job(start_lottery_cycle, "interval", seconds=60, args=[app])
-    scheduler.start()
-
-    logger.info("QLottery_bot started ✅")
-    await app.run_polling()
+    print("✅ QLottery Bot đang khởi động...")
+    # Chạy background xổ số song song
+    asyncio.create_task(background_lottery_cycle())
+    # Chạy bot polling
+    await app.run_polling(drop_pending_updates=True, allowed_updates=telegram.constants.Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except Exception as e:
-        logger.exception(f"Bot crashed: {e}")
-from admin import (
-    add_money_handler,
-    create_code_handler,
-    topnap_handler,
-    force_result_handler
-)
-
-app.add_handler(CommandHandler("congtien", add_money_handler))
-app.add_handler(CommandHandler("code", create_code_handler))
-app.add_handler(CommandHandler("topnap", topnap_handler))
-app.add_handler(CommandHandler(["nho", "lon", "chan", "le"], force_result_handler))
-
+    import telegram  # import ở đây để tránh lỗi vòng tròn
+    asyncio.run(main())
