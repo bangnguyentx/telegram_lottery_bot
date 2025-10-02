@@ -87,42 +87,26 @@ def get_user(user_id: int):
         c.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
         return c.fetchone()
 
-def check_user_balance(user_id: int, amount: float) -> bool:
-    """Kiểm tra xem user có đủ tiền cược không"""
-    user = get_user(user_id)
-    return user and user["balance"] >= amount
-
 def update_balance(user_id: int, new_balance: float):
     with get_conn() as conn:
         c = conn.cursor()
         c.execute("UPDATE users SET balance=? WHERE user_id=?", (new_balance, user_id))
 
-def deduct_balance(user_id: int, amount: float) -> bool:
-    """Trừ tiền khi cược, tránh âm tài khoản"""
-    user = get_user(user_id)
-    if not user or user["balance"] < amount:
-        return False
-    new_balance = user["balance"] - amount
-    update_balance(user_id, new_balance)
-    return True
-
 # ==============================
 # 👥 GROUPS
 # ==============================
-
-def ensure_group(chat_id: int, title: str):
-    """Lưu group nếu chưa có"""
-    with get_conn() as conn:
-        c = conn.cursor()
-        c.execute("SELECT chat_id FROM groups WHERE chat_id=?", (chat_id,))
-        if not c.fetchone():
-            c.execute("INSERT INTO groups(chat_id, title, approved) VALUES (?,?,1)", (chat_id, title))
 
 def get_all_groups():
     with get_conn() as conn:
         c = conn.cursor()
         c.execute("SELECT * FROM groups WHERE approved=1")
         return c.fetchall()
+
+def get_group(chat_id: int):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM groups WHERE chat_id=?", (chat_id,))
+        return c.fetchone()
 
 # ==============================
 # 🎟️ BETS
@@ -139,30 +123,15 @@ def insert_or_update_bet(chat_id, round_id, user_id, bet_type, bet_value, amount
         DO UPDATE SET amount = amount + excluded.amount
         """, (chat_id, round_id, user_id, bet_type, bet_value, amount, user_id))
 
-def get_bets_for_round(chat_id, round_id, user_id):
+def get_user_bet_in_round(user_id, chat_id, round_id, bet_type, bet_value):
+    """Lấy vé cược cụ thể của user trong phiên"""
     with get_conn() as conn:
         c = conn.cursor()
         c.execute("""
         SELECT * FROM bets 
-        WHERE chat_id=? AND round_id=? AND user_id=?
-        """, (chat_id, round_id, user_id))
-        return c.fetchall()
-
-def get_bets_for_round_all(chat_id, round_id):
-    with get_conn() as conn:
-        c = conn.cursor()
-        c.execute("""
-        SELECT b.*, u.balance 
-        FROM bets b 
-        JOIN users u ON b.user_id=u.user_id 
-        WHERE b.chat_id=? AND b.round_id=?
-        """, (chat_id, round_id))
-        return c.fetchall()
-
-def clear_bets_for_round(chat_id, round_id):
-    with get_conn() as conn:
-        c = conn.cursor()
-        c.execute("DELETE FROM bets WHERE chat_id=? AND round_id=?", (chat_id, round_id))
+        WHERE user_id=? AND chat_id=? AND round_id=? AND bet_type=? AND bet_value=?
+        """, (user_id, chat_id, round_id, bet_type, bet_value))
+        return c.fetchone()
 
 # ==============================
 # 📝 HISTORY
