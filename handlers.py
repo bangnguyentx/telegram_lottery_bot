@@ -1,124 +1,144 @@
-from telegram import Update
-from telegram.ext import ContextTypes
-from datetime import datetime
-from db import db_query, db_execute, ensure_user
-from utils import format_money, lock_group_chat, unlock_group_chat
+# handlers.py — Xử lý lệnh cược & nhóm QLottery_bot
+
 import re
+import logging
+from datetime import datetime
+from telegram import Update
+from telegram.ext import ContextTypes, CommandHandler, MessageHandler, filters
 
-MIN_BET = 1000
+from db import get_user, ensure_user, update_balance, insert_or_update_bet, get_bets_for_round, clear_bets_for_round
+from utils import format_money, get_current_round_id, lock_group_chat, unlock_group_chat, send_countdown
 
-# 🟢 Xử lý cược lớn / nhỏ / chẵn / lẻ
-async def bet_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    if msg is None or msg.text is None:
-        return
+logger = logging.getLogger(__name__)
 
-    text = msg.text.strip()
+# Hệ số trả thưởng
+PAYOUTS = {
+    "N": 1.97,
+    "L": 1.97,
+    "C": 1.97,
+    "LE": 1.97
+}
+
+# ----- 📌 XỬ LÝ CƯỢC -----
+
+async def group_bet_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Xử lý cược trong nhóm: /N1000, /L1000, /C1000, /Le1000, /S123456 1000"""
+    msg = update.effective_message
     user = update.effective_user
     chat = update.effective_chat
-
-    # Chỉ nhận lệnh bắt đầu bằng /
-    if not text.startswith("/"):
-        return
-
-    # Nhận dạng lệnh: /N1000, /L1000, /C1000, /Le1000
-    cmd = text[1:].lower()
-
-    # Kiểm tra định dạng hợp lệ
-    prefix = None
-    if cmd.startswith("n"):
-        prefix = "nho"
-    elif cmd.startswith("l") and not cmd.startswith("le"):
-        prefix = "lon"
-    elif cmd.startswith("c"):
-        prefix = "chan"
-    elif cmd.startswith("le"):
-        prefix = "le"
-
-    if not prefix:
-        # có thể là cược số
-        await bet_number_handler(update, context)
-        return
-
-    # lấy tiền cược
-    amount_str = re.sub(r'[^0-9]', '', cmd)
-    if not amount_str.isdigit():
-        return
-    amount = int(amount_str)
-
-    if amount < MIN_BET:
-        await msg.reply_text(f"❌ Cược tối thiểu {MIN_BET:,}₫")
-        return
-
-    # kiểm tra user có trong DB chưa
-    ensure_user(user.id, user.username or "", user.first_name or "")
-    u = db_query("SELECT balance FROM users WHERE user_id=?", (user.id,))
-    if not u or (u[0]['balance'] or 0) < amount:
-        await msg.reply_text("💸 Số dư không đủ.")
-        return
-
-    # trừ tiền ngay
-    new_balance = (u[0]['balance'] or 0) - amount
-    db_execute("UPDATE users SET balance=? WHERE user_id=?", (new_balance, user.id))
-
-    # lưu cược vào DB
-    now_ts = int(datetime.utcnow().timestamp())
-    round_epoch = now_ts // 60
-    round_id = f"{chat.id}_{round_epoch}"
-
-    db_execute("""
-        INSERT INTO bets(chat_id, round_id, user_id, bet_type, amount, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (chat.id, round_id, user.id, prefix, amount, datetime.utcnow().isoformat()))
-
-    await msg.reply_text(f"✅ Đã đặt {prefix.upper()} {format_money(amount)} cho phiên hiện tại.")
-
-# 🔢 Cược theo số /S<dãy số> <tiền>
-async def bet_number_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
     text = msg.text.strip()
-    user = update.effective_user
-    chat = update.effective_chat
 
-    # cú pháp: /S123456 1000
-    match = re.match(r"^/s(\d{1,6})\s+(\d+)$", text.lower())
-    if not match:
-        return
-    number_seq = match.group(1)
-    amount = int(match.group(2))
-
-    if amount < MIN_BET:
-        await msg.reply_text(f"❌ Cược tối thiểu {MIN_BET:,}₫")
+    if chat.type not in ("group", "supergroup"):
         return
 
+    # Đảm bảo user tồn tại DB
     ensure_user(user.id, user.username or "", user.first_name or "")
-    u = db_query("SELECT balance FROM users WHERE user_id=?", (user.id,))
-    if not u or (u[0]['balance'] or 0) < amount:
-        await msg.reply_text("💸 Số dư không đủ.")
+
+    # Lấy thông tin user
+    u = get_user(user.id)
+    if not u:
+        await msg.reply_text("Lỗi tài khoản, vui lòng /start lại.")
         return
 
-    new_balance = (u[0]['balance'] or 0) - amount
-    db_execute("UPDATE users SET balance=? WHERE user_id=?", (new_balance, user.id))
+    # Xác định loại cược
+    bet_type = None
+    amount = None
+    bet_value = None
 
-    now_ts = int(datetime.utcnow().timestamp())
-    round_epoch = now_ts // 60
-    round_id = f"{chat.id}_{round_epoch}"
+    # Kiểm tra lệnh nhỏ/lớn/chẵn/lẻ
+    m = re.match(r"^/(N|L|C|Le)(\d+)$", text, re.IGNORECASE)
+    if m:
+        bet_type = m.group(1).upper()
+        amount = int(m.group(2))
+        if bet_type == "LE":
+            bet_type = "LE"  # giữ nguyên chữ hoa cho lẻ
 
-    db_execute("""
-        INSERT INTO bets(chat_id, round_id, user_id, bet_type, bet_value, amount, timestamp)
-        VALUES (?, ?, ?, 'so', ?, ?, ?)
-    """, (chat.id, round_id, user.id, number_seq, amount, datetime.utcnow().isoformat()))
+    # Kiểm tra lệnh cược số /S123456 1000
+    if text.startswith("/S"):
+        parts = text.split()
+        if len(parts) != 2:
+            await msg.reply_text("Cú pháp sai. Ví dụ: /S123456 1000")
+            return
+        numbers = parts[0][2:].strip()
+        amount = int(parts[1])
+        if not numbers.isdigit() or len(numbers) == 0 or len(numbers) > 6:
+            await msg.reply_text("Số cược không hợp lệ (1–6 chữ số).")
+            return
+        bet_type = "S"
+        bet_value = numbers
 
-    await msg.reply_text(f"✅ Đã đặt {number_seq} {format_money(amount)} cho phiên hiện tại.")
+    if not bet_type or not amount or amount <= 0:
+        return
 
-# ⏱ Gửi thông báo đếm ngược 30s, 10s, khóa chat 5s
-async def countdown_notifications(context: ContextTypes.DEFAULT_TYPE, chat_id: int, seconds_left: int):
-    if seconds_left == 30:
-        await context.bot.send_message(chat_id=chat_id, text="⏱ Còn 30 giây để đặt cược!")
-    elif seconds_left == 10:
-        await context.bot.send_message(chat_id=chat_id, text="⚠️ Còn 10 giây!")
-    elif seconds_left == 5:
-        await context.bot.send_message(chat_id=chat_id, text="🔒 Khoá chat, chuẩn bị quay số!")
-        await lock_group_chat(context.bot, chat_id)
-    elif seconds_left == 0:
-        await unlock_group_chat(context.bot, chat_id)
+    # ✅ Kiểm tra số dư
+    balance = u["balance"] or 0
+    if balance < amount:
+        await msg.reply_text("❌ Số dư không đủ.")
+        return
+
+    # ✅ Xác định round hiện tại
+    round_id = get_current_round_id(chat.id)
+
+    # ✅ Kiểm tra không cược ngược cùng phiên
+    existing_bets = get_bets_for_round(chat.id, round_id, user.id)
+    if existing_bets:
+        for b in existing_bets:
+            if b["bet_type"] in ("N", "L") and bet_type in ("N", "L") and b["bet_type"] != bet_type:
+                await msg.reply_text("❌ Bạn không thể cược Nhỏ và Lớn cùng phiên.")
+                return
+            if b["bet_type"] in ("C", "LE") and bet_type in ("C", "LE") and b["bet_type"] != bet_type:
+                await msg.reply_text("❌ Bạn không thể cược Chẵn và Lẻ cùng phiên.")
+                return
+
+    # ✅ Trừ tiền ngay
+    new_balance = balance - amount
+    update_balance(user.id, new_balance)
+
+    # ✅ Ghi cược vào DB (nếu đã cược cùng loại → cộng dồn)
+    insert_or_update_bet(chat.id, round_id, user.id, bet_type, bet_value, amount)
+
+    # ✅ Xác nhận đặt cược
+    if bet_type == "S":
+        display = f"Số {bet_value}"
+    elif bet_type == "N":
+        display = "Nhỏ"
+    elif bet_type == "L":
+        display = "Lớn"
+    elif bet_type == "C":
+        display = "Chẵn"
+    elif bet_type == "LE":
+        display = "Lẻ"
+
+    await msg.reply_text(f"✅ Đã đặt {display} {format_money(amount)} cho phiên hiện tại.")
+
+# ----- 🧮 TÍNH THƯỞNG -----
+
+def calculate_payout(bet_type: str, bet_value: str, amount: int, result_number: str, result_category: str):
+    """Tính tiền thưởng dựa theo loại cược & kết quả"""
+    if bet_type in ("N", "L", "C", "LE"):
+        if bet_type == result_category:
+            return int(amount * PAYOUTS[bet_type])
+        return 0
+
+    if bet_type == "S":
+        # So khớp số cuối cùng của kết quả với bet_value
+        if result_number.endswith(bet_value):
+            n = len(bet_value)
+            if n == 1:
+                return int(amount * 9.2)
+            elif n == 2:
+                return int(amount * 90)
+            elif n == 3:
+                return int(amount * 900)
+            elif n == 4:
+                return int(amount * 8000)
+            elif n == 5:
+                return int(amount * 50000)
+            elif n == 6:
+                return int(amount * 200000)
+    return 0
+
+# ----- ⏰ ĐĂNG KÝ HANDLER -----
+
+def register_group_handlers(app):
+    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS, group_bet_handler))
