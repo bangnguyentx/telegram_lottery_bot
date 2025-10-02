@@ -1,17 +1,16 @@
 # handlers.py — Xử lý lệnh người dùng & nhóm cho QLottery_bot
 
 import re
-from datetime import datetime
 from telegram import Update
-from telegram.ext import ContextTypes, CommandHandler, MessageHandler, filters
+from telegram.ext import ContextTypes, MessageHandler, filters
 
 from db import (
     get_user,
     ensure_user,
-    insert_bet,
-    get_user_bet_in_round,
-    update_bet_amount,
+    insert_or_update_bet,
     get_group,
+    update_balance,
+    get_user_bet_in_round,
 )
 from utils import (
     get_current_round_id,
@@ -19,14 +18,13 @@ from utils import (
 )
 
 # ----------- CẤU HÌNH -----------
-
 MIN_BET = 5000  # Mức cược tối thiểu
 
 # ----------- HỖ TRỢ -----------
 
 def parse_bet_command(text: str):
     """
-    Trả về (bet_type, bet_value, amount) nếu hợp lệ
+    Trả về (bet_type, bet_value, amount) nếu hợp lệ.
     Hỗ trợ:
     /N1000 /L5000 /C20000 /Le10000
     /S123456 1000
@@ -59,7 +57,6 @@ async def group_bet_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Chỉ xử lý trong group
     if chat.type not in ("group", "supergroup"):
         return
-
     if not msg.text:
         return
 
@@ -76,7 +73,6 @@ async def group_bet_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Đảm bảo user tồn tại trong DB
     ensure_user(user.id, user.username or "", user.first_name or "")
-
     u = get_user(user.id)
     if not u:
         await msg.reply_text("❌ Lỗi người dùng, hãy /start trước khi cược.")
@@ -95,10 +91,7 @@ async def group_bet_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Xác định round hiện tại
     round_id = get_current_round_id(chat.id)
 
-    # Kiểm tra vé đã cược trong phiên này
-    existing_bet = get_user_bet_in_round(user.id, chat.id, round_id, bet_type, bet_value)
-
-    # ❌ Không cho cược ngược
+    # ❌ Kiểm tra cược ngược
     if bet_type in ("N", "L"):
         opposite = "L" if bet_type == "N" else "N"
     elif bet_type in ("C", "LE"):
@@ -112,28 +105,26 @@ async def group_bet_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("🚫 Bạn không thể cược ngược trong cùng một phiên!")
             return
 
-    # Nếu đã cược cùng loại → cộng dồn tiền
-    if existing_bet:
-        new_amount = existing_bet["amount"] + amount
-        update_bet_amount(existing_bet["id"], new_amount)
-    else:
-        insert_bet(chat.id, round_id, user.id, bet_type, bet_value, amount)
+    # Kiểm tra vé cũ
+    existing_bet = get_user_bet_in_round(user.id, chat.id, round_id, bet_type, bet_value)
 
-    # Trừ tiền người chơi
+    # Cập nhật cược
+    insert_or_update_bet(chat.id, round_id, user.id, bet_type, bet_value, amount)
     new_balance = u["balance"] - amount
-    from db import update_balance
     update_balance(user.id, new_balance)
 
-    await msg.reply_text(f"✅ Đã cược {bet_type} {format_money(amount)} cho phiên hiện tại.")
+    if existing_bet:
+        reply_text = f"✅ Đã cộng dồn cược {bet_type} {format_money(amount)}"
+    else:
+        reply_text = f"✅ Đã cược {bet_type} {format_money(amount)} cho phiên này."
+
+    await msg.reply_text(reply_text)
 
 # ----------- ĐĂNG KÝ HANDLERS -----------
 
 def register_group_handlers(app):
-    """Đăng ký handler cho group"""
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, group_bet_handler))
     app.add_handler(MessageHandler(filters.COMMAND, group_bet_handler))
 
-
 def register_user_handlers(app):
-    """Các lệnh riêng tư (PM bot)"""
     pass
