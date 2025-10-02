@@ -1,197 +1,127 @@
+# db.py — SQLite cho QLottery_bot
+
 import sqlite3
 from datetime import datetime
 
-DB_PATH = "data.db"  # Tên file database
+DB_PATH = "lottery.db"
 
-# ==============================
-# 🧰 Kết nối database
-# ==============================
+# ----- 🔧 KHỞI TẠO -----
+
 def get_conn():
     return sqlite3.connect(DB_PATH)
 
-# ==============================
-# 🏗️ Tạo bảng
-# ==============================
 def init_db():
-    conn = get_conn()
-    cur = conn.cursor()
-
-    # Bảng người dùng
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS users(
             user_id INTEGER PRIMARY KEY,
             username TEXT,
-            balance INTEGER DEFAULT 0,
-            total_bet INTEGER DEFAULT 0,
-            received_bonus INTEGER DEFAULT 0
-        )
-    """)
-
-    # Bảng lịch sử phiên
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS rounds (
-            period_id INTEGER PRIMARY KEY,
-            result TEXT,
-            created_at TEXT
-        )
-    """)
-
-    # Bảng cược
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS bets (
+            first_name TEXT,
+            balance REAL DEFAULT 0,
+            total_bet REAL DEFAULT 0
+        )""")
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS groups(
+            chat_id INTEGER PRIMARY KEY,
+            title TEXT,
+            approved INTEGER DEFAULT 1
+        )""")
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS bets(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            period_id INTEGER,
+            chat_id INTEGER,
+            round_id TEXT,
             user_id INTEGER,
             bet_type TEXT,
             bet_value TEXT,
-            amount INTEGER,
+            amount REAL,
+            balance REAL,
+            UNIQUE(chat_id, round_id, user_id, bet_type, bet_value)
+        )""")
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS history(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            round_id TEXT,
+            result_number TEXT,
+            size TEXT,
+            parity TEXT,
             created_at TEXT
-        )
-    """)
-
-    # Bảng code nạp
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS codes (
-            code TEXT PRIMARY KEY,
-            amount INTEGER,
-            bet_turns INTEGER,
-            used_by INTEGER,
-            created_at TEXT
-        )
-    """)
-
-    conn.commit()
-    conn.close()
-
-# ==============================
-# 👤 Thêm user mới nếu chưa có
-# ==============================
-def ensure_user(user_id: int, username: str):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT user_id FROM users WHERE user_id=?", (user_id,))
-    if not cur.fetchone():
-        cur.execute("INSERT INTO users (user_id, username, balance) VALUES (?, ?, 0)", (user_id, username))
+        )""")
         conn.commit()
-    conn.close()
 
-# ==============================
-# 💰 Lấy số dư
-# ==============================
-def get_balance(user_id: int) -> int:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT balance FROM users WHERE user_id=?", (user_id,))
-    row = cur.fetchone()
-    conn.close()
-    return row[0] if row else 0
+# ----- 👤 USER -----
 
-# ==============================
-# ➕ Cộng tiền
-# ==============================
-def add_balance(user_id: int, amount: int):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (amount, user_id))
-    conn.commit()
-    conn.close()
+def ensure_user(user_id, username, first_name):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT user_id FROM users WHERE user_id=?", (user_id,))
+        if not c.fetchone():
+            c.execute("INSERT INTO users(user_id, username, first_name, balance) VALUES (?,?,?,80000)", 
+                      (user_id, username, first_name))
+            conn.commit()
 
-# ==============================
-# ➖ Trừ tiền (nếu đủ)
-# ==============================
-def subtract_balance(user_id: int, amount: int) -> bool:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT balance FROM users WHERE user_id=?", (user_id,))
-    row = cur.fetchone()
-    if not row or row[0] < amount:
-        conn.close()
-        return False
-    cur.execute("UPDATE users SET balance = balance - ? WHERE user_id=?", (amount, user_id))
-    conn.commit()
-    conn.close()
-    return True
+def get_user(user_id):
+    with get_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
+        return c.fetchone()
 
-# ==============================
-# 💸 Đặt cược
-# ==============================
-def insert_bet(period_id: int, user_id: int, bet_type: str, bet_value: str, amount: int):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO bets (period_id, user_id, bet_type, bet_value, amount, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (period_id, user_id, bet_type, bet_value, amount, datetime.utcnow().isoformat()))
-    cur.execute("UPDATE users SET total_bet = total_bet + ? WHERE user_id=?", (amount, user_id))
-    conn.commit()
-    conn.close()
+def update_balance(user_id, new_balance):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("UPDATE users SET balance=? WHERE user_id=?", (new_balance, user_id))
+        conn.commit()
 
-# ==============================
-# 🧾 Lưu kết quả phiên
-# ==============================
-def insert_round(period_id: int, result: str):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("INSERT OR REPLACE INTO rounds (period_id, result, created_at) VALUES (?, ?, ?)",
-                (period_id, result, datetime.utcnow().isoformat()))
-    conn.commit()
-    conn.close()
+# ----- 📝 BETS -----
 
-# ==============================
-# 🧮 Lấy tất cả cược theo phiên
-# ==============================
-def get_bets_by_period(period_id: int):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT user_id, bet_type, bet_value, amount FROM bets WHERE period_id=?", (period_id,))
-    rows = cur.fetchall()
-    conn.close()
-    return rows
+def insert_or_update_bet(chat_id, round_id, user_id, bet_type, bet_value, amount):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("""
+        INSERT INTO bets(chat_id, round_id, user_id, bet_type, bet_value, amount, balance)
+        VALUES (?,?,?,?,?,?,(SELECT balance FROM users WHERE user_id=?))
+        ON CONFLICT(chat_id, round_id, user_id, bet_type, bet_value)
+        DO UPDATE SET amount = amount + excluded.amount
+        """, (chat_id, round_id, user_id, bet_type, bet_value, amount, user_id))
+        conn.commit()
 
-# ==============================
-# 📝 Lấy lịch sử phiên (tối đa 15 bản ghi)
-# ==============================
-def get_last_rounds(limit: int = 15):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT period_id, result FROM rounds ORDER BY period_id DESC LIMIT ?", (limit,))
-    rows = cur.fetchall()
-    conn.close()
-    return rows[::-1]  # đảo ngược để hiện từ cũ → mới
+def get_bets_for_round(chat_id, round_id, user_id):
+    with get_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("SELECT * FROM bets WHERE chat_id=? AND round_id=? AND user_id=?", 
+                  (chat_id, round_id, user_id))
+        return c.fetchall()
 
-# ==============================
-# 🧑‍💻 Lấy top 10 người nạp nhiều nhất (giả sử = balance hiện tại)
-# ==============================
-def get_top10_users():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT user_id, username, balance FROM users ORDER BY balance DESC LIMIT 10")
-    rows = cur.fetchall()
-    conn.close()
-    return rows
+def get_bets_for_round_all(chat_id, round_id):
+    with get_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("SELECT b.*, u.balance FROM bets b JOIN users u ON b.user_id=u.user_id WHERE b.chat_id=? AND b.round_id=?", 
+                  (chat_id, round_id))
+        return c.fetchall()
 
-# ==============================
-# 🧾 Code nạp tiền
-# ==============================
-def create_code(code: str, amount: int, bet_turns: int):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("INSERT INTO codes (code, amount, bet_turns, created_at) VALUES (?, ?, ?, ?)",
-                (code, amount, bet_turns, datetime.utcnow().isoformat()))
-    conn.commit()
-    conn.close()
+def clear_bets_for_round(chat_id, round_id):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("DELETE FROM bets WHERE chat_id=? AND round_id=?", (chat_id, round_id))
+        conn.commit()
 
-def redeem_code(code: str, user_id: int) -> int:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT amount, used_by FROM codes WHERE code=?", (code,))
-    row = cur.fetchone()
-    if not row or row[1] is not None:
-        conn.close()
-        return 0
-    amount = row[0]
-    cur.execute("UPDATE codes SET used_by=? WHERE code=?", (user_id, code))
-    cur.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (amount, user_id))
-    conn.commit()
-    conn.close()
-    return amount
+# ----- 📜 HISTORY & GROUPS -----
+
+def insert_history(chat_id, round_id, result_number, size, parity):
+    with get_conn() as conn:
+        c = conn.cursor()
+        c.execute("INSERT INTO history(chat_id, round_id, result_number, size, parity, created_at) VALUES (?,?,?,?,?,?)", 
+                  (chat_id, round_id, result_number, size, parity, datetime.utcnow().isoformat()))
+        conn.commit()
+
+def get_all_groups():
+    with get_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("SELECT * FROM groups WHERE approved=1")
+        return c.fetchall()
