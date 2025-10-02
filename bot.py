@@ -8,7 +8,7 @@ from db import init_db
 from utils import start_lottery_cycle
 
 # --- CẤU HÌNH ---
-TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
+TOKEN = "7482983031:AAHp-DGJMGr0AWoOEk75eV02glQNlPn0wKI"
 ADMIN_IDS = [7760459637]   # Admin chính
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
